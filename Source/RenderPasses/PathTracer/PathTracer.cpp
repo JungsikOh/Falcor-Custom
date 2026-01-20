@@ -130,6 +130,8 @@ namespace
     const std::string kUseRTXDI = "useRTXDI";
     const std::string kRTXDIOptions = "RTXDIOptions";
 
+    const std::string kUseResampling = "useResampling"; // added by jungsik
+
     const std::string kUseAlphaTest = "useAlphaTest";
     const std::string kAdjustShadingNormals = "adjustShadingNormals";
     const std::string kMaxNestedMaterials = "maxNestedMaterials";
@@ -232,6 +234,8 @@ void PathTracer::parseProperties(const Properties& props)
         else if (key == kLightBVHOptions) mLightBVHOptions = value;
         else if (key == kUseRTXDI) mStaticParams.useRTXDI = value;
         else if (key == kRTXDIOptions) mRTXDIOptions = value;
+
+        else if (key == kUseResampling) mStaticParams.useResampling = value;
 
         // Material parameters
         else if (key == kUseAlphaTest) mStaticParams.useAlphaTest = value;
@@ -357,6 +361,8 @@ Properties PathTracer::getProperties() const
     if (mStaticParams.emissiveSampler == EmissiveLightSamplerType::LightBVH) props[kLightBVHOptions] = mLightBVHOptions;
     props[kUseRTXDI] = mStaticParams.useRTXDI;
     props[kRTXDIOptions] = mRTXDIOptions;
+
+    props[kUseResampling] = mStaticParams.useResampling;
 
     // Material parameters
     props[kUseAlphaTest] = mStaticParams.useAlphaTest;
@@ -589,6 +595,9 @@ bool PathTracer::renderRenderingUI(Gui::Widgets& widget)
             }
         }
     }
+
+    dirty |= widget.checkbox("Importance Resampling for Global Illumination(2005)", mStaticParams.useResampling);
+    widget.tooltip("Use Importance Resampling for Global Illumination written by Talbot in 2005");
 
     if (auto group = widget.group("RTXDI"))
     {
@@ -1417,6 +1426,8 @@ DefineList PathTracer::StaticParams::getDefines(const PathTracer& owner) const
     defines.add("COLOR_FORMAT", std::to_string((uint32_t)colorFormat));
     defines.add("MIS_HEURISTIC", std::to_string((uint32_t)misHeuristic));
     defines.add("MIS_POWER_EXPONENT", std::to_string(misPowerExponent));
+
+    defines.add("USE_RESAMPLING", useResampling ? "1" : "0");
 
     // Sampling utilities configuration.
     FALCOR_ASSERT(owner.mpSampleGenerator);

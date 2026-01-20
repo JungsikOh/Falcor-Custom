@@ -56,3 +56,5 @@ static const bool kUseNRDDemodulation = USE_NRD_DEMODULATION;
 static const uint kColorFormat = COLOR_FORMAT;
 static const uint kMISHeuristic = MIS_HEURISTIC;
 static const float kMISPowerExponent = MIS_POWER_EXPONENT;
+
+static const bool kUseResamping = USE_RESAMPLING;

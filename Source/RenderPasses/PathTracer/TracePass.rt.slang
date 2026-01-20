@@ -497,6 +497,7 @@ struct Scheduler
         }
 
         // Loop over samples.
+        // slang에서 직접 spp를 세팅해서 반복문으로 처리하는 구조
         while (samplesRemaining > 0)
         {
             samplesRemaining -= 1;

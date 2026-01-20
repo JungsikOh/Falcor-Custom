@@ -132,6 +132,9 @@ private:
         EmissiveLightSamplerType emissiveSampler = EmissiveLightSamplerType::LightBVH;  ///< Emissive light sampler to use for NEE.
         bool        useRTXDI = false;                           ///< Use RTXDI for direct illumination.
 
+        // Sampling parameters added by jungsik
+        bool        useResampling = false;                      ///< Use resampling for direct illumination.
+
         // Material parameters
         bool        useAlphaTest = true;                        ///< Use alpha testing on non-opaque triangles.
         bool        adjustShadingNormals = false;               ///< Adjust shading normals on secondary hits.
