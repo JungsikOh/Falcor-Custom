@@ -877,10 +877,9 @@ struct PathTracer
         // Check if the scatter event is samplable by the light sampling technique.
         const bool isLightSamplable = path.isLightSamplable();
 
-
         // Add emitted radiance.
         // The primary hit is always included, secondary hits only if emissive lights are enabled and the full light contribution hasn't been sampled elsewhere.
-        bool computeEmissive = isPrimaryHit || kUseEmissiveLights && (!kUseNEE || kUseMIS || !path.isLightSampled() || !isLightSamplable);
+        bool computeEmissive = isPrimaryHit || kUseEmissiveLights && (!kUseNEE || !kUseResamping || kUseMIS || !path.isLightSampled() || !isLightSamplable);
 
         // With RTXDI enabled, we sample the full direct illumination contribution on the primary hit.
         // Skip any additional contribution on the secondary hit unless it comes from a scatter event
@@ -909,6 +908,24 @@ struct PathTracer
                 // Emissive light samplers have an option to exclusively sample the upper hemisphere.
                 bool upperHemisphere = path.isLightSampledUpper() && !path.isLightSampledLower();
                 float lightPdf = getEmissiveSelectionProbability() * emissiveSampler.evalPdf(path.origin, path.normal, upperHemisphere, hit);
+
+                // Compute MIS weight by combining this with BSDF sampling.
+                // Note we can assume path.pdf > 0.f since we shouldn't have got here otherwise.
+                misWeight = evalMIS(1, path.pdf, 1, lightPdf);
+            }
+            else if (kUseEmissiveLights && kUseResamping && kUseMIS && isTriangleHit && !isPrimaryHit && path.isLightSampled() && isLightSamplable)
+            {
+                // Prepare hit point struct with data needed for emissive light PDF evaluation.
+                TriangleLightHit hit;
+                TriangleHit triangleHit = path.hit.getTriangleHit();
+                hit.triangleIndex = gScene.lightCollection.getTriangleIndex(triangleHit.instanceID, triangleHit.primitiveIndex);
+                hit.posW = sd.posW;
+                hit.normalW = sd.getOrientedFaceNormal();
+
+                // Evaluate PDF at the hit, had it been generated with light sampling.
+                // Emissive light samplers have an option to exclusively sample the upper hemisphere.
+                bool upperHemisphere = path.isLightSampledUpper() && !path.isLightSampledLower();
+                float lightPdf = getEmissiveSelectionProbability() * 4.f * emissiveSampler.evalPdf(path.origin, path.normal, upperHemisphere, hit);
 
                 // Compute MIS weight by combining this with BSDF sampling.
                 // Note we can assume path.pdf > 0.f since we shouldn't have got here otherwise.
@@ -1026,7 +1043,7 @@ struct PathTracer
             float totalWeight = 0.f;
             float selectedTargetPdf = 0.f;
             float3 selectedBsdfVal = float3(0.f);
-            uint M = 1;
+            uint M = 4;
 
             PathVertex vertex = PathVertex(path.getVertexIndex(), sd.posW, sd.faceN, sd.frontFacing);
 
@@ -1069,6 +1086,14 @@ struct PathTracer
             // weight(=g/p) / g --> 1/p
             if (validSample)
             {
+                // Apply MIS weight.
+                if (kUseMIS && !applyRTXDI && ls.lightType != (uint)LightType::Analytic)
+                {
+                    float effectiveLightPdf = ls.pdf * float(M);
+                    float scatterPdf = mi.evalPdf(sd, ls.dir, kUseBSDFSampling);
+                    ls.Li *= evalMIS(1, effectiveLightPdf, 1, scatterPdf);
+                }
+
                 float W = (totalWeight / M) / selectedTargetPdf; // weight / M * 1/ g
                 float3 Lr = (ls.Li * ls.pdf) * (selectedBsdfVal * W); // [Le * G] * [F * (weight / M * 1/ g)]
                 if (any(Lr > 0.f))
@@ -1158,7 +1183,7 @@ struct PathTracer
         const bool isLightSamplable = path.isLightSamplable();
 
         // Add env radiance.
-        bool computeEnv = kUseEnvLight && (!kUseNEE || kUseMIS || !path.isLightSampled() || !isLightSamplable);
+        bool computeEnv = kUseEnvLight && ((!kUseNEE && !kUseResamping) || kUseMIS || !path.isLightSampled() || !isLightSamplable);
 
         // With RTXDI enabled, we sample the full direct illumination contribution on the primary hit.
         // Skip any additional contribution on the secondary hit unless it comes from a scatter event

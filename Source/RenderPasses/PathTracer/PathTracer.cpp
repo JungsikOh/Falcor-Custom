@@ -596,8 +596,45 @@ bool PathTracer::renderRenderingUI(Gui::Widgets& widget)
         }
     }
 
-    dirty |= widget.checkbox("Importance Resampling for Global Illumination(2005)", mStaticParams.useResampling);
+    dirty |= widget.checkbox("Importance Resampling (RIS)", mStaticParams.useResampling);
     widget.tooltip("Use Importance Resampling for Global Illumination written by Talbot in 2005");
+
+    if (mStaticParams.useResampling)
+    {
+        dirty |= widget.checkbox("Multiple importance sampling (MIS)", mStaticParams.useMIS);
+        widget.tooltip(
+            "When enabled, BSDF sampling is combined with light sampling for the environment map and emissive lights.\n"
+            "Note that MIS has currently no effect on analytic lights."
+        );
+
+        if (mStaticParams.useMIS)
+        {
+            dirty |= widget.dropdown("MIS heuristic", mStaticParams.misHeuristic);
+
+            if (mStaticParams.misHeuristic == MISHeuristic::PowerExp)
+            {
+                dirty |= widget.var("MIS power exponent", mStaticParams.misPowerExponent, 0.01f, 10.f);
+            }
+        }
+        if (mpScene && mpScene->useEmissiveLights())
+        {
+            if (auto group = widget.group("Emissive sampler"))
+            {
+                if (widget.dropdown("Emissive sampler", mStaticParams.emissiveSampler))
+                {
+                    resetLighting();
+                    dirty = true;
+                }
+                widget.tooltip("Selects which light sampler to use for importance sampling of emissive geometry.", true);
+
+                if (mpEmissiveSampler)
+                {
+                    if (mpEmissiveSampler->renderUI(group))
+                        mOptionsChanged = true;
+                }
+            }
+        }
+    }
 
     if (auto group = widget.group("RTXDI"))
     {
