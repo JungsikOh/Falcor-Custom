@@ -89,6 +89,9 @@ struct PathTracer
                                 Static members
     *******************************************************************/
 
+    // Importance sampling settings.
+    static const uint RESAMPLING_M = 8;
+
     // Render settings that depend on the scene.
     // TODO: Move into scene defines.
     static const bool kUseEnvLight = USE_ENV_LIGHT;
@@ -925,7 +928,7 @@ struct PathTracer
                 // Evaluate PDF at the hit, had it been generated with light sampling.
                 // Emissive light samplers have an option to exclusively sample the upper hemisphere.
                 bool upperHemisphere = path.isLightSampledUpper() && !path.isLightSampledLower();
-                float lightPdf = getEmissiveSelectionProbability() * 4.f * emissiveSampler.evalPdf(path.origin, path.normal, upperHemisphere, hit);
+                float lightPdf = getEmissiveSelectionProbability() * RESAMPLING_M * emissiveSampler.evalPdf(path.origin, path.normal, upperHemisphere, hit);
 
                 // Compute MIS weight by combining this with BSDF sampling.
                 // Note we can assume path.pdf > 0.f since we shouldn't have got here otherwise.
@@ -1037,73 +1040,98 @@ struct PathTracer
         }
         else if (applyRIS)
         {
-            LightSample ls = {};
-            bool validSample = false;
+
+            // 후보 정보 저장
+            LightSample candidates[RESAMPLING_M];
+            float weights[RESAMPLING_M];
+            float3 bsdfVals[RESAMPLING_M];
+            uint validCount = 0;
+            uint lightCount = gScene.getLightCount();
 
             float totalWeight = 0.f;
-            float selectedTargetPdf = 0.f;
-            float3 selectedBsdfVal = float3(0.f);
-            uint M = 4;
 
             PathVertex vertex = PathVertex(path.getVertexIndex(), sd.posW, sd.faceN, sd.frontFacing);
 
             bool canNeeSampleSphere = isCurveHit || isCurvePolyTubeHit;
-            // Determine if upper/lower hemispheres need to be sampled.
             bool sampleUpperHemisphere = canNeeSampleSphere || ((lobeTypes & (uint)LobeType::NonDeltaReflection) != 0);
             bool sampleLowerHemisphere = canNeeSampleSphere || ((lobeTypes & (uint)LobeType::NonDeltaTransmission) != 0);
             if (!kUseLightsInDielectricVolumes && path.isInsideDielectricVolume()) sampleUpperHemisphere = false;
+            path.setLightSampled(sampleUpperHemisphere, sampleLowerHemisphere);
 
-            [unroll]
-            for (uint i = 0; i < M; i++)
+            // 1단계: 모든 후보 평가 및 weight 계산
+            for (uint i = 0; i < RESAMPLING_M; i++)
             {
-                LightSample candidate = {};
-                bool valid = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, path.sg, candidate);
+                candidates[i] = {};
+                bsdfVals[i] = float3(0.f);
+                weights[i] = 0.f;
+
+                bool valid = generateLightSample(vertex, sampleUpperHemisphere, sampleLowerHemisphere, path.sg, candidates[i]);
 
                 if (valid)
                 {
-                    // we use '* ls.pdf', because candidate.Li was divided by ls.pdf in generateLightSample.
-                    float3 bsdfVal = mi.eval(sd, candidate.dir, path.sg);
-                    float3 Lr = bsdfVal * (candidate.Li * candidate.pdf); // F * G * Le
-                    if (any(Lr > 0.f))
+                    float tmpPdf = candidates[i].lightType == (uint)LightType::Analytic ? 1.f / lightCount : candidates[i].pdf;
+                    float3 bsdfVal = mi.eval(sd, candidates[i].dir, path.sg);
+                    float3 contribution = bsdfVal * candidates[i].Li * tmpPdf;
+
+                    if (any(contribution > 0.f))
                     {
-                        float targetPdf = luminance(Lr);
-                        float3 targetBsdfVal = bsdfVal;
-                        float risWeight = targetPdf / candidate.pdf; // g / p
+                        float targetPdf = luminance(contribution);
+                        weights[i] = targetPdf / tmpPdf; // RIS weight: g/p
+                        bsdfVals[i] = bsdfVal;
+                        validCount++;
 
-                        totalWeight += risWeight;
-
-                        // This code is different from standard importance resampling. Here we select the candidate directly proportional to its RIS weight.
-                        if (M == 1 || sampleNext1D(path.sg) < (risWeight / totalWeight))
-                        {
-                            ls = candidate;
-                            selectedTargetPdf = targetPdf;
-                            selectedBsdfVal = targetBsdfVal;
-                            validSample = true;
-                        }
+                        totalWeight += weights[i];
                     }
                 }
             }
-            // weight(=g/p) / g --> 1/p
-            if (validSample)
+
+            // 2단계: 합계에 비례하여 샘플 선택
+            if (totalWeight > 0.f)
             {
-                // Apply MIS weight.
-                if (kUseMIS && !applyRTXDI && ls.lightType != (uint)LightType::Analytic)
+                uint selectedIdx = 0;
+                float u = sampleNext1D(path.sg); // 1. 다트를 던진다 (0.0 ~ 1.0 사이 랜덤)
+                float cumulative = 0.0f;          // 2. 자(Ruler)의 눈금을 0에서 시작
+
+                for (uint i = 0; i < RESAMPLING_M; i++)
                 {
-                    float effectiveLightPdf = ls.pdf * float(M);
-                    float scatterPdf = mi.evalPdf(sd, ls.dir, kUseBSDFSampling);
-                    ls.Li *= evalMIS(1, effectiveLightPdf, 1, scatterPdf);
+                    // 현재 사람의 지분(크기)만큼 눈금을 이동
+                    cumulative += weights[i] / totalWeight;
+
+                    // 3. 다트(u)가 현재 눈금(cumulative)보다 안쪽에 꽂혔니?
+                    if (u < cumulative)
+                    {
+                        selectedIdx = i; // 당첨!
+                        break;           // 뒤는 볼 필요 없음
+                    }
                 }
 
-                float W = (totalWeight / M) / selectedTargetPdf; // weight / M * 1/ g
-                float3 Lr = (ls.Li * ls.pdf) * (selectedBsdfVal * W); // [Le * G] * [F * (weight / M * 1/ g)]
+                // 선택된 후보로 기여 계산
+                LightSample ls = candidates[selectedIdx];
+                ls.pdf = ls.lightType == (uint)LightType::Analytic ? 1.f / lightCount : ls.pdf;
+                float3 selectedBsdfVal = bsdfVals[selectedIdx];
+                float selectedTargetPdf = weights[selectedIdx] * ls.pdf; // g = w * p
+
+                // RIS contribution weight: W = W_sum / (M * g)
+                float W = totalWeight / (float(RESAMPLING_M) * selectedTargetPdf);
+
+                // 최종 기여
+                float3 Lr = selectedBsdfVal * (ls.Li * ls.pdf) * W;
+
+                // MIS 적용
+                if (kUseMIS && ls.lightType != (uint)LightType::Analytic)
+                {
+                    float effectivePdf = ls.pdf * float(RESAMPLING_M);
+                    float scatterPdf = mi.evalPdf(sd, ls.dir, kUseBSDFSampling);
+                    float misWeight = evalMIS(1, effectivePdf, 1, scatterPdf);
+                    Lr *= misWeight;
+                }
+
                 if (any(Lr > 0.f))
                 {
                     Ray ray = ls.getVisibilityRay();
 
                     if (isCurvePolyTubeHit)
                     {
-                        // For curves tessellated into poly-tubes, we make sure that the origin is on the same side as light
-                        // so there is no self-shadowing (transmission lobe of hair BSDF takes care of that).
                         if (dot(sd.frame.N, ray.dir) < 0.f)
                         {
                             ray.origin = ray.origin - sd.frame.N * sd.curveRadius * 2.1f;
@@ -1115,7 +1143,6 @@ struct PathTracer
                     if (visible) addToPathContribution(path, Lr);
                 }
             }
-            path.setLightSampled(sampleUpperHemisphere, sampleLowerHemisphere);
         }
 
         // Russian roulette to terminate paths early.
@@ -1204,6 +1231,14 @@ struct PathTracer
 
                 // Evaluate PDF, had it been generated with light sampling.
                 float lightPdf = getEnvMapSelectionProbability() * envMapSampler.evalPdf(path.dir);
+
+                // Compute MIS weight by combining this with BSDF sampling.
+                // Note we can assume path.pdf > 0.f since we shouldn't have got here otherwise.
+                misWeight = evalMIS(1, path.pdf, 1, lightPdf);
+            }
+            else if (kUseResamping && kUseMIS && path.isLightSampled() && isLightSamplable)
+            {
+                float lightPdf = getEnvMapSelectionProbability() * RESAMPLING_M * envMapSampler.evalPdf(path.dir);
 
                 // Compute MIS weight by combining this with BSDF sampling.
                 // Note we can assume path.pdf > 0.f since we shouldn't have got here otherwise.
