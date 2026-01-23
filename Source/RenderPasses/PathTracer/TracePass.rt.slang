@@ -497,7 +497,7 @@ struct Scheduler
         }
 
         // Loop over samples.
-        // slang¿¡¼­ Á÷Á¢ spp¸¦ ¼¼ÆÃÇØ¼­ ¹Ýº¹¹®À¸·Î Ã³¸®ÇÏ´Â ±¸Á¶
+        // slangì—ì„œ ì§ì ‘ sppë¥¼ ì„¸íŒ…í•´ì„œ ë°˜ë³µë¬¸ìœ¼ë¡œ ì²˜ë¦¬í•˜ëŠ” êµ¬ì¡°
         while (samplesRemaining > 0)
         {
             samplesRemaining -= 1;

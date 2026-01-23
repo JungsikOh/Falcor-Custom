@@ -9,6 +9,7 @@ target_sources(PathTracer PRIVATE
     Params.slang
     PathState.slang
     PathTracer.slang
+    Reservoir.slang
     PathTracer.cpp
     PathTracer.h
     PathTracerNRD.slang
