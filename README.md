@@ -6,7 +6,7 @@ Falcor is a real-time rendering framework supporting DirectX 12 and Vulkan. It a
 
 Custom Features include:
 - Importance Resampling for Global Illumination (EGSR 2005, Talbot)
-- ReSTIR DI (SIGG, 2020, Bitterli) (but It's not implemented for Alias Table)
+- ReSTIR DI (SIGG, 2020, Bitterli) (but It is not implemented using an Alias Table.)
 
 ## Resources
 - [Falcor](https://github.com/NVIDIAGameWorks/Falcor): Falcor's GitHub page.
