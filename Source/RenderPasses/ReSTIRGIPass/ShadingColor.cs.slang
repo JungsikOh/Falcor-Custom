@@ -44,6 +44,7 @@ struct ShadingColorPass
         const HitInfo hit = unpackHitInfo(gVBuffer[pixel]);
 
         ShadingData sd = loadShadingData(hit, primaryCameraRay.origin, primaryCameraRay.dir);
+        TinyUniformSampleGenerator sg = TinyUniformSampleGenerator(pixel, params.frameCount);
 
         // Create material instance and query its properties.
         let lod = ExplicitLodTextureSampler(0.f);
@@ -59,24 +60,25 @@ struct ShadingColorPass
         float distToLight = distance(rayOrigin, sample.samplePoint);
         float3 Li = sample.Le * reservoir.W;
 
-        bool valid = reservoir.M != 0;
+        bool valid = reservoir.M != 0 && reservoir.W > 0.f && sample.valid != 0;
 
-        if (valid)
-        {
-            // Create a DXR 1.1 query object to trace a ray (the <1> means use alpha testing)
-            SceneRayQuery<1> rayQuery;
-            const Ray ray = Ray(rayOrigin, dirToLight, 0.0f, distToLight);
-            if (!rayQuery.traceVisibilityRay(ray, RAY_FLAG_NONE, 0xff))
-            {
-                valid = false;
-            }
-        }
+        // if (valid)
+        // {
+        //     // Create a DXR 1.1 query object to trace a ray (the <1> means use alpha testing)
+        //     SceneRayQuery<1> rayQuery;
+        //     const Ray ray = Ray(rayOrigin, dirToLight, 0.0f, distToLight);
+        //     if (!rayQuery.traceVisibilityRay(ray, RAY_FLAG_NONE, 0xff))
+        //     {
+        //         valid = false;
+        //     }
+        // }
 
         float3 indirectColor = float3(0.f);
 
         if (valid)
         {
-            indirectColor = Li;
+            float3 bsdfVal = mi.eval(sd, dirToLight, sg);
+            indirectColor = bsdfVal * Li;
         }
 
         float3 directColor = directLighting[pixel].xyz;

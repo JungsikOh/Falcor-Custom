@@ -73,6 +73,21 @@ public:
         PathTracing     = 1,
     };
 
+    enum class ReSTIRGIMode : uint32_t
+    {
+        NoResampling = 0,
+        TemporalResampling = 1,
+        SpatialResampling = 2,
+        SpatioTemporalResampling = 3
+    };
+
+    enum class BiasedMode : uint32_t
+    {
+        Biased = 0,
+        UnbiasedNaive = 1,
+        UnbiasedPairwiseMIS = 2
+    };
+
 private:
     struct TracePass
     {
@@ -118,8 +133,7 @@ private:
     void rotateGIReservoirs(bool usedTemporal, bool usedSpatial);
 
     void clearReservoirs(RenderContext* pRenderContext);
-    void temporalReusePass(RenderContext* pRenderContext, const RenderData& renderData);
-    void spatialReusePass(RenderContext* pRenderContext, const RenderData& renderData);
+    void giResamplingPass(RenderContext* pRenderContext, const RenderData& renderData);
     void shadingColorPass(RenderContext* pRenderContext, const RenderData& renderData);
 
     /** Static configuration. Changing any of these options require shader recompilation.
@@ -229,10 +243,13 @@ private:
     bool                            mOnlyComputeIndirect = true; ///< Output only indirect lighting contribution.
     bool                            mOnlyComputeDirect = false;  ///< Output only direct lighting contribution.
     bool                            mSpatialUnbiased = false;    ///< Use unbiased spatial reuse (MIS-based Z estimator).
+    bool                            mSpatialPairwiseMIS = false;    ///< Use unbiased temporal reuse (MIS-based Z estimator).
     uint32_t                        mMaxReservoirAge = 30;       ///< Maximum age of reservoirs before they are discarded.
+    ReSTIRGIMode                    mReSTIRGIMode = ReSTIRGIMode::SpatioTemporalResampling;   ///< ReSTIR GI mode.
+    BiasedMode                      mBiasedMode = BiasedMode::Biased; ///< Whether to use biased or unbiased (naive or pairwise MIS) estimator for spatial and temporal reuse.
 
-    ref<ComputePass> mpTemporalReusePass;
-    ref<ComputePass> mpSpatialReusePass;
+
+    ref<ComputePass> mpGIResamplingPass;
     ref<ComputePass> mpShadingColorPass;
 
     ref<Buffer> mpGIInitialReservoir;

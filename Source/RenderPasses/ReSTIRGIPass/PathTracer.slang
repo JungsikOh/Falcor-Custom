@@ -999,6 +999,8 @@ struct PathTracer
 
                     float3 weight = mi.eval(sd, ls.dir, path.sg);
                     float3 Lr = weight * ls.Li;
+
+
                     if (any(Lr > 0.f))
                     {
                         Ray ray = ls.getVisibilityRay();
@@ -1006,7 +1008,6 @@ struct PathTracer
                         {
                             ls.pdf = gScene.getLightCount(); // Prevent division by zero in visibility ray tracing.
                         }
-                        // Lr *= ls.pdf;
 
                         if (isCurvePolyTubeHit)
                         {

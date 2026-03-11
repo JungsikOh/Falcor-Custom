@@ -38,8 +38,7 @@ namespace
     const std::string kResolvePassFilename = "RenderPasses/ReSTIRGIPass/ResolvePass.cs.slang";
     const std::string kReflectTypesFile = "RenderPasses/ReSTIRGIPass/ReflectTypes.cs.slang";
 
-    const std::string kTemporalReuseFile = "RenderPasses/ReSTIRGIPass/TemporalReuse.cs.slang";
-    const std::string kSpatialReuseFile = "RenderPasses/ReSTIRGIPass/SpatialReuse.cs.slang";
+    const std::string kGIResamplingFile = "RenderPasses/ReSTIRGIPass/SpatioTemporalReuse.cs.slang";
     const std::string kShadingColorFile = "RenderPasses/ReSTIRGIPass/ShadingColor.cs.slang";
 
     // Render pass inputs and outputs.
@@ -154,6 +153,19 @@ namespace
     const std::string kOutputSize = "outputSize";
     const std::string kFixedOutputSize = "fixedOutputSize";
     const std::string kColorFormat = "colorFormat";
+
+    const Gui::DropdownList kReSTIRGIModeList = {
+        {0, "No Resampling"},
+        {1, "Temporal Resampling"},
+        {2, "Spatial Resampling"},
+        {3, "SpatioTemporal Resampling"},
+    };
+
+    const Gui::DropdownList kBiasedModeList = {
+        {0, "Biased"},
+        {1, "Unbiased Naive"},
+        {2, "Unbiased MIS"},
+    };
 }
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
@@ -490,9 +502,8 @@ void ReSTIRGIPass::execute(RenderContext* pRenderContext, const RenderData& rend
         tracePass(pRenderContext, renderData, *mpTracePass);
 
         // ReSTIR-GI passes.
-        if (mUseTemporal) temporalReusePass(pRenderContext, renderData);
-        if (mUseSpatial) spatialReusePass(pRenderContext, renderData);
-        if (mUseTemporal || mUseSpatial) shadingColorPass(pRenderContext, renderData);
+        giResamplingPass(pRenderContext, renderData);
+        if (mReSTIRGIMode != ReSTIRGIPass::ReSTIRGIMode::NoResampling) shadingColorPass(pRenderContext, renderData);
 
         // Launch separate passes to trace delta reflection and transmission paths to generate respective guide buffers.
         if (mOutputNRDAdditionalData)
@@ -514,41 +525,11 @@ void ReSTIRGIPass::execute(RenderContext* pRenderContext, const RenderData& rend
 
 void ReSTIRGIPass::rotateGIReservoirs(bool usedTemporal, bool usedSpatial)
 {
-    if (usedTemporal && usedSpatial)
-    {
-        // ============================================
-        // Full pipeline: 3-way rotation
-        // ============================================
-        ref<Buffer> temp = mpGIInitialReservoir;
+    ref<Buffer> temp = mpGIInitialReservoir;
 
-        mpGIInitialReservoir = mpGISpatialReservoir;      // Spatial → Initial
-        mpGISpatialReservoir = mpGITemporalReservoir;     // Temporal → Spatial
-        mpGITemporalReservoir = temp;                      // Initial → Temporal
-    }
-    else if (usedTemporal && !usedSpatial)
-    {
-        // ============================================
-        // Temporal only: 2-way swap
-        // ============================================
-        // Temporal output becomes next frame's input
-        std::swap(mpGIInitialReservoir, mpGITemporalReservoir);
-    }
-    else if (!usedTemporal && usedSpatial)
-    {
-        // ============================================
-        // Spatial only: 2-way swap
-        // ============================================
-        // Spatial output becomes next frame's input
-        std::swap(mpGIInitialReservoir, mpGISpatialReservoir);
-    }
-    else
-    {
-        // ============================================
-        // No reuse: Copy trace output
-        // ============================================
-        // Trace output (in Temporal) becomes next frame's input
-        std::swap(mpGIInitialReservoir, mpGITemporalReservoir);
-    }
+    mpGIInitialReservoir = mpGISpatialReservoir;      // Resampled output → becomes next prev
+    mpGISpatialReservoir = mpGITemporalReservoir;     // Trace buffer → free for next output
+    mpGITemporalReservoir = temp;                      // Old prev → free for next trace
 }
 
 void ReSTIRGIPass::renderUI(Gui::Widgets& widget)
@@ -706,20 +687,11 @@ bool ReSTIRGIPass::renderRenderingUI(Gui::Widgets& widget)
         runtimeDirty |= widget.checkbox("Only Compute Direct Lighting", mOnlyComputeDirect);
         widget.tooltip("Only compute direct lighting, skipping indirect lighting computation.");
 
-        runtimeDirty |= widget.checkbox("Use temporal reuse", mUseTemporal);
-        widget.tooltip("Enable temporal reuse in ReSTIR GI.");
-
-        runtimeDirty |= widget.checkbox("Use spatial reuse", mUseSpatial);
-        widget.tooltip("Enable spatial reuse in ReSTIR GI.");
-
-        dirty |= widget.checkbox("Turn on spatial unbiased mode", mSpatialUnbiased);
-        widget.tooltip("When enabled, spatial reuse will only consider samples from neighboring pixels that are statistically independent. This eliminates bias introduced by spatial reuse at the cost of increased variance.");
-    }
-
-    if (auto group = widget.group("Denoiser options"))
-    {
-        dirty |= widget.checkbox("Use NRD demodulation", mStaticParams.useNRDDemodulation);
-        widget.tooltip("Global switch for NRD demodulation");
+        dirty |= widget.dropdown("ReSTIR GI Mode", kReSTIRGIModeList, (uint32_t&)mReSTIRGIMode);
+        if (mReSTIRGIMode != ReSTIRGIPass::ReSTIRGIMode::NoResampling)
+        {
+            dirty |= widget.dropdown("Biased Mode", kBiasedModeList, (uint32_t&)mBiasedMode);
+        }
     }
 
     if (auto group = widget.group("Scheduling options"))
@@ -874,8 +846,7 @@ void ReSTIRGIPass::resetPrograms()
     mpGeneratePaths = nullptr;
     mpReflectTypes = nullptr;
 
-    mpTemporalReusePass = nullptr;
-    mpSpatialReusePass = nullptr;
+    mpGIResamplingPass = nullptr;
     mpShadingColorPass = nullptr;
 
     mRecompile = true;
@@ -931,17 +902,11 @@ void ReSTIRGIPass::updatePrograms()
         desc.addShaderLibrary(kReflectTypesFile).csEntry("main");
         mpReflectTypes = ComputePass::create(mpDevice, desc, defines, false);
     }
-    if (!mpTemporalReusePass)
+    if (!mpGIResamplingPass)
     {
         ProgramDesc desc = baseDesc;
-        desc.addShaderLibrary(kTemporalReuseFile).csEntry("main");
-        mpTemporalReusePass = ComputePass::create(mpDevice, desc, defines, false);
-    }
-    if (!mpSpatialReusePass)
-    {
-        ProgramDesc desc = baseDesc;
-        desc.addShaderLibrary(kSpatialReuseFile).csEntry("main");
-        mpSpatialReusePass = ComputePass::create(mpDevice, desc, defines, false);
+        desc.addShaderLibrary(kGIResamplingFile).csEntry("main");
+        mpGIResamplingPass = ComputePass::create(mpDevice, desc, defines, false);
     }
     if (!mpShadingColorPass)
     {
@@ -962,8 +927,7 @@ void ReSTIRGIPass::updatePrograms()
     preparePass(mpGeneratePaths);
     preparePass(mpResolvePass);
     preparePass(mpReflectTypes);
-    preparePass(mpTemporalReusePass);
-    preparePass(mpSpatialReusePass);
+    preparePass(mpGIResamplingPass);
     preparePass(mpShadingColorPass);
 
     mVarsChanged = true;
@@ -1578,56 +1542,64 @@ void ReSTIRGIPass::clearReservoirs(RenderContext* pRenderContext)
     logInfo("Reservoirs cleared");
 }
 
-void ReSTIRGIPass::temporalReusePass(RenderContext* pRenderContext, const RenderData& renderData)
+void ReSTIRGIPass::giResamplingPass(RenderContext* pRenderContext, const RenderData& renderData)
 {
-    FALCOR_PROFILE(pRenderContext, "temporalReusePass");
+    FALCOR_PROFILE(pRenderContext, "giResamplingPass");
 
-    // Additional specialization. This shouldn't change resource declarations.
-    mpTemporalReusePass->addDefine("OUTPUT_GUIDE_DATA", mOutputGuideData ? "1" : "0");
-    mpTemporalReusePass->addDefine("OUTPUT_NRD_DATA", mOutputNRDData ? "1" : "0");
+    // Additional specialization.
+    if (mReSTIRGIMode == ReSTIRGIPass::ReSTIRGIMode::TemporalResampling)
+    {
+        mpGIResamplingPass->addDefine("USE_TEMPORAL_REUSE", "1");
+        mpGIResamplingPass->addDefine("USE_SPATIAL_REUSE", "0");
+    }
+    else if (mReSTIRGIMode == ReSTIRGIPass::ReSTIRGIMode::SpatialResampling)
+    {
+        mpGIResamplingPass->addDefine("USE_TEMPORAL_REUSE", "0");
+        mpGIResamplingPass->addDefine("USE_SPATIAL_REUSE", "1");
+    }
+    else if (mReSTIRGIMode == ReSTIRGIPass::ReSTIRGIMode::SpatioTemporalResampling)
+    {
+        mpGIResamplingPass->addDefine("USE_TEMPORAL_REUSE", "1");
+        mpGIResamplingPass->addDefine("USE_SPATIAL_REUSE", "1");
+    }
+
+    if (mBiasedMode == ReSTIRGIPass::BiasedMode::Biased)
+    {
+        mpGIResamplingPass->addDefine("USE_SPATIAL_BIASED", "1");
+        mpGIResamplingPass->addDefine("USE_SPATIAL_UNBIASED", "0");
+        mpGIResamplingPass->addDefine("USE_PAIRWISE_MIS", "0");
+    }
+    else if (mBiasedMode == ReSTIRGIPass::BiasedMode::UnbiasedNaive)
+    {
+        mpGIResamplingPass->addDefine("USE_SPATIAL_BIASED", "0");
+        mpGIResamplingPass->addDefine("USE_SPATIAL_UNBIASED", "1");
+        mpGIResamplingPass->addDefine("USE_PAIRWISE_MIS", "0");
+    }
+    else if (mBiasedMode == ReSTIRGIPass::BiasedMode::UnbiasedPairwiseMIS)
+    {
+        mpGIResamplingPass->addDefine("USE_SPATIAL_BIASED", "0");
+        mpGIResamplingPass->addDefine("USE_SPATIAL_UNBIASED", "0");
+        mpGIResamplingPass->addDefine("USE_PAIRWISE_MIS", "1");
+    }
 
     // Bind resources.
-    auto var = mpTemporalReusePass->getRootVar()["CB"]["gTemporalReusePass"];
+    auto var = mpGIResamplingPass->getRootVar()["CB"]["gGIResamplingPass"];
     var["params"].setBlob(mParams);
     var["motionVec"] = renderData.getTexture(kInputMotionVectors);
 
-    var["outputReservoirs"] = mpGITemporalReservoir;
-    var["prevReservoirs"] = mpGIInitialReservoir;
     var["surfaceData"] = mpSurfaceData;
     var["prevSurfaceData"] = mpPrevSurfaceData;
+    var["inputReservoirs"] = mpGITemporalReservoir;      // Current frame trace output (trace writes here)
+    var["prevReservoirs"] = mpGIInitialReservoir;         // Previous frame's fully resampled reservoirs (via rotation)
+    var["outputReservoirs"] = mpGISpatialReservoir;       // Output resampled reservoirs
 
-    mpScene->bindShaderData(mpTemporalReusePass->getRootVar()["gScene"]);
+    mpPixelStats->prepareProgram(mpGIResamplingPass->getProgram(), mpGIResamplingPass->getRootVar());
+    mpPixelDebug->prepareProgram(mpGIResamplingPass->getProgram(), mpGIResamplingPass->getRootVar());
 
-    mpPixelStats->prepareProgram(mpTemporalReusePass->getProgram(), mpTemporalReusePass->getRootVar());
-    mpPixelDebug->prepareProgram(mpTemporalReusePass->getProgram(), mpTemporalReusePass->getRootVar());
-
-    // Launch one thread per pixel.
-    mpTemporalReusePass->execute(pRenderContext, { mParams.frameDim, 1u });
-}
-
-void ReSTIRGIPass::spatialReusePass(RenderContext* pRenderContext, const RenderData& renderData)
-{
-    FALCOR_PROFILE(pRenderContext, "spatialReusePass");
-
-    // Additional specialization. This shouldn't change resource declarations.
-    mpSpatialReusePass->addDefine("OUTPUT_GUIDE_DATA", mOutputGuideData ? "1" : "0");
-    mpSpatialReusePass->addDefine("OUTPUT_NRD_DATA", mOutputNRDData ? "1" : "0");
-
-    // Bind resources.
-    auto var = mpSpatialReusePass->getRootVar()["CB"]["gSpatialReusePass"];
-    var["params"].setBlob(mParams);
-
-    var["reservoirs"] = mpGITemporalReservoir;
-    var["outputReservoirs"] = mpGISpatialReservoir;
-    var["surfaceData"] = mpSurfaceData;
-
-    mpPixelStats->prepareProgram(mpSpatialReusePass->getProgram(), mpSpatialReusePass->getRootVar());
-    mpPixelDebug->prepareProgram(mpSpatialReusePass->getProgram(), mpSpatialReusePass->getRootVar());
-
-    mpScene->bindShaderData(mpSpatialReusePass->getRootVar()["gScene"]);
+    mpScene->bindShaderData(mpGIResamplingPass->getRootVar()["gScene"]);
 
     // Launch one thread per pixel.
-    mpSpatialReusePass->execute(pRenderContext, { mParams.frameDim, 1u });
+    mpGIResamplingPass->execute(pRenderContext, { mParams.frameDim, 1u });
 }
 
 void ReSTIRGIPass::shadingColorPass(RenderContext* pRenderContext, const RenderData& renderData)
@@ -1647,7 +1619,11 @@ void ReSTIRGIPass::shadingColorPass(RenderContext* pRenderContext, const RenderD
     var["directLighting"] = mSaveNEE ? mpDirectLightingNEE : renderData.getTexture(kInputDirectLighting);
     var["gOutputColor"] = renderData.getTexture(kOutputColor);
 
-    var["gReservoirs"] =  mUseTemporal ? mpGITemporalReservoir : mpGISpatialReservoir;
+    // Read from the correct output buffer:
+    // - temporal+spatial (giResampling): output is in mpGISpatialReservoir
+    // - temporal only: output is in mpGITemporalReservoir
+    // - spatial only: output is in mpGISpatialReservoir
+    var["gReservoirs"] = mpGISpatialReservoir;
 
     mpScene->bindShaderData(mpShadingColorPass->getRootVar()["gScene"]);
 
@@ -1721,7 +1697,12 @@ DefineList ReSTIRGIPass::StaticParams::getDefines(const ReSTIRGIPass& owner) con
 
     defines.add("USE_ONLY_INDIRECT", "0");
     defines.add("USE_ONLY_DIRECT", "0");
+
+    defines.add("USE_TEMPORAL_REUSE", owner.mUseTemporal ? "1" : "0");
+    defines.add("USE_SPATIAL_REUSE", owner.mUseSpatial ? "1" : "0");
     defines.add("USE_SPATIAL_UNBIASED", owner.mSpatialUnbiased ? "1" : "0");
+    defines.add("USE_PAIRWISE_MIS", "1");
+
     defines.add("USE_NEE_FOR_DIRECT", owner.mSaveNEE ? "1" : "0");
     defines.add("MAX_RESERVOIR_AGE", std::to_string(owner.mMaxReservoirAge));
 

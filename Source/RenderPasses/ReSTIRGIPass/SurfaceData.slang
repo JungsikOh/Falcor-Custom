@@ -170,7 +170,7 @@ struct SurfaceData
         float f = evalBRDF(sampleToLight, wo);
 
         // Check that the sample direction is in the upper hemisphere
-        float cosTheta = dot(this.normal, sampleToLight);
+        float cosTheta = saturate(dot(sampleToLight, this.normal));
         if (cosTheta <= 0.f) return 0.f;
 
         // #1.
@@ -178,7 +178,7 @@ struct SurfaceData
         // #2.
         // result = sample.Le;
 
-        return luminance(result * cosTheta);
+        return luminance(result);
     }
 };
 

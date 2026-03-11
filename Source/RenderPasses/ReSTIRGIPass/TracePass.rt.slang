@@ -466,6 +466,8 @@ struct Scheduler
         SampleGI sample = {};
         ReservoirGI reservoirGI = {};
         float3 primaryRadiance = float3(0.f);
+        float3 primaryThp = float3(1.f);
+        float samplePdf = 1.f;
 
         gPathTracer.generatePath(pathID, path);
         gPathTracer.setupPathLogging(path);
@@ -487,6 +489,7 @@ struct Scheduler
             gPathTracer.handleHit(path, vq);
 #endif
             sample.sourcePdf = path.pdf;
+            primaryThp = path.thp;
             primaryRadiance = path.L;
         }
         else
@@ -499,27 +502,26 @@ struct Scheduler
         // Trace path.
         while (path.isActive())
         {
+
             nextHit(path);
+
             // path.getVertexIndex() == kMaxSurfaceBounces - 1
-            if (any(path.L > 0.f))
+            if (path.isHit() && path.getVertexIndex() > 1)
             {
-                sample.Le = path.L - primaryRadiance;
+                sample.Le = (path.L - primaryRadiance) / primaryThp;
+
+                // For the secondary vertex, we save the sample for ReSTIR GI.
                 sample.samplePoint = path.origin;
                 sample.sampleNormal = path.normal;
                 sample.valid = 1;
-
-                //bool updated = reservoirGI.update(sample, luminance(sample.Le), sampleNext1D(path.sg));
             }
         }
 
         reservoirGI.sample = sample;
-        reservoirGI.weightSum = luminance(sample.Le) / sample.sourcePdf;
-        reservoirGI.M = 1;
-        reservoirGI.W = luminance(sample.Le) > 0 ? (reservoirGI.weightSum / reservoirGI.M) / luminance(sample.Le) : 0.f;
-
-        reservoirGI.W = clamp(reservoirGI.W, 0.f, 1e20f);
+        reservoirGI.M = sample.valid;
 
         uint bufferIndex = path.getPixel().y * gPathTracer.params.frameDim.x + path.getPixel().x;
+
         gOutputReservoirGI[bufferIndex] = reservoirGI.pack();
         gDirectRadiance[path.getPixel()] = primaryRadiance;
 

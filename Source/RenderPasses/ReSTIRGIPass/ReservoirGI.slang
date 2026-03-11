@@ -8,10 +8,12 @@ struct PackedSampleGI
     uint4 surfaceGeometry;
     uint4 sampleGeometry;
 
-    uint Le;
+    uint3 Le;
     uint sourcePdf;
+
     uint valid;
     uint _pad0 = 0;
+    uint2 _pad1 = 0;
 };
 
 // 68B / 36B
@@ -33,7 +35,7 @@ struct SampleGI
         sample.surfaceNormal = decodeNormal2x16(packed.surfaceGeometry.w);
         sample.samplePoint = asfloat(packed.sampleGeometry.xyz);
         sample.sampleNormal = decodeNormal2x16(packed.sampleGeometry.w);
-        sample.Le = decodeLogLuvHDR(packed.Le);
+        sample.Le = asfloat(packed.Le);
         sample.sourcePdf = asfloat(packed.sourcePdf);
         sample.valid = packed.valid;
 
@@ -48,7 +50,7 @@ struct SampleGI
         packedSample.surfaceGeometry.w = encodeNormal2x16(this.surfaceNormal);
         packedSample.sampleGeometry.xyz = asuint(this.samplePoint);
         packedSample.sampleGeometry.w = encodeNormal2x16(this.sampleNormal);
-        packedSample.Le = encodeLogLuvHDR(this.Le);
+        packedSample.Le = asuint(this.Le);
         packedSample.sourcePdf = asuint(this.sourcePdf);
         packedSample.valid = this.valid;
 
@@ -90,10 +92,9 @@ struct ReservoirGI
         weightSum += weight;
         M += 1;
 
-        if (rnd * weightSum < weight)
+        if (rnd * weightSum <= weight)
         {
             sample = lightSample;
-            W = targetPDF;
             return true;
         }
         return false;
@@ -106,22 +107,12 @@ struct ReservoirGI
         weightSum += weight;
         M += other.M;
 
-        if (rnd * weightSum < weight)
+        if (rnd * weightSum <= weight)
         {
             sample.Le = other.sample.Le;
             sample.samplePoint = other.sample.samplePoint;
             sample.sampleNormal = other.sample.sampleNormal;
-            W = targetPdf;
             age = other.age;
-
-            // When isCurrent, copy full surface geometry from the current reservoir.
-            if (isCurrent)
-            {
-                sample.surfacePoint = other.sample.surfacePoint;
-                sample.surfaceNormal = other.sample.surfaceNormal;
-                sample.sourcePdf = other.sample.sourcePdf;
-                sample.valid = other.sample.valid;
-            }
 
             sample.valid = sample.valid || other.sample.valid;
             return true;
@@ -139,8 +130,9 @@ struct ReservoirGI
         reservoir.M = packed.M;
 
         // Guard against degenerate weights from NaN/Inf.
-        if (isinf(reservoir.W) || isnan(reservoir.W))
+        if (isinf(reservoir.W) || isnan(reservoir.W) || isinf(reservoir.weightSum) || isnan(reservoir.weightSum))
         {
+            reservoir.weightSum = 0.f;
             reservoir.W = 0.f;
             reservoir.M = 0;
         }
@@ -159,3 +151,11 @@ struct ReservoirGI
         return p;
     }
 };
+
+void finalizeGIResampling(
+    inout ReservoirGI reservoir,
+    float normalizationNumerator,
+    float normalizationDenominator)
+{
+    reservoir.weightSum = (normalizationDenominator == 0.0) ? 0.0 : (reservoir.weightSum * normalizationNumerator) / normalizationDenominator;
+}

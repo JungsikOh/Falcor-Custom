@@ -3,8 +3,7 @@ add_plugin(ReSTIRGIPass)
 target_sources(ReSTIRGIPass PRIVATE
     SurfaceData.slang
     ReservoirGI.slang
-    TemporalReuse.cs.slang
-    SpatialReuse.cs.slang
+    SpatioTemporalReuse.cs.slang
     ShadingColor.cs.slang
 
     ColorType.slang
